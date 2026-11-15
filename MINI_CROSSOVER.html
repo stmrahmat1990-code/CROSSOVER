@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MINI CROSSOVER DIGITAL</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#17191e;color:#e7e7e7;font-family:Arial,sans-serif}
+header{padding:15px 18px;background:#20242b;border-bottom:1px solid #383d46}
+h1{font-size:20px;margin:0}
+small{color:#9da5b1}
+main{max-width:1050px;margin:auto;padding:16px;display:grid;gap:14px}
+.panel{background:#22262e;border:1px solid #393f49;border-radius:9px;padding:15px}
+h2{font-size:15px;margin:0 0 13px;color:#dce3ed}
+button,.filelabel{background:#303743;color:#f2f4f7;border:1px solid #505968;border-radius:6px;padding:10px 14px;cursor:pointer}
+button:hover,.filelabel:hover{background:#3b4655}
+button:disabled{opacity:.45;cursor:not-allowed}
+input[type=file]{display:none}
+.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+.modes{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.mode{padding:17px 8px;font-size:18px;font-weight:bold;border:2px solid #48505c;background:#282e38}
+.mode.active[data-mode=sub]{border-color:#42d486;background:#173b2b;color:#75f0aa}
+.mode.active[data-mode=mid]{border-color:#e6b84f;background:#493817;color:#ffdb82}
+.mode.active[data-mode=high]{border-color:#4cb8ff;background:#17354d;color:#83d1ff}
+.status{color:#aeb7c4;font-size:13px;margin-top:10px}
+.eqgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.eqitem{background:#1b1f26;padding:12px;border-radius:7px}
+.eqitem label{display:flex;justify-content:space-between;font-size:13px;margin-bottom:10px}
+.eqitem input{width:100%;accent-color:#65baff}
+.eqitem output{color:#8dcfff;font-variant-numeric:tabular-nums}
+input[type=range]{cursor:pointer}
+audio{width:100%;margin-top:12px}
+input[type=range].seek{width:100%;accent-color:#65baff}
+.note{font-size:12px;color:#aab2bd;line-height:1.5}
+progress{width:100%;height:12px;accent-color:#56b6ff}
+@media(max-width:600px){.eqgrid{grid-template-columns:repeat(2,minmax(0,1fr))}.modes{gap:6px}.mode{font-size:15px;padding:14px 5px}}
+</style>
+</head>
+<body>
+<header><h1>MINI CROSSOVER DIGITAL</h1><small>SUB • MID • HIGH • 6-BAND EQ</small></header>
+<main>
+<section class="panel">
+<h2>1. AUDIO INPUT</h2>
+<div class="row">
+<label class="filelabel" for="file">Pilih Audio</label>
+<input id="file" type="file" accept="audio/*">
+<button id="play" disabled>Play</button>
+<button id="pause" disabled>Pause</button>
+<button id="stop" disabled>Stop</button>
+</div>
+<div class="status" id="filename">Belum ada audio.</div>
+<audio id="player" controls></audio>
+</section>
+
+<section class="panel">
+<h2>2. PILIH OUTPUT CROSSOVER</h2>
+<div class="modes">
+<button class="mode active" data-mode="sub">SUB</button>
+<button class="mode" data-mode="mid">MID</button>
+<button class="mode" data-mode="high">HIGH</button>
+</div>
+<div class="status" id="modeInfo">SUB: frekuensi rendah dengan pengurangan vokal/kick berbasis stereo.</div>
+</section>
+
+<section class="panel">
+<h2>3. EQ MODE (dB)</h2>
+<div class="eqgrid" id="modeEQ"></div>
+</section>
+
+<section class="panel">
+<h2>4. MASTER EQ (dB)</h2>
+<div class="eqgrid" id="masterEQ"></div>
+<p class="note">Master EQ berlaku untuk semua mode. Nilai EQ mode dan master akan ikut diproses saat export.</p>
+</section>
+
+<section class="panel">
+<h2>5. EXPORT AUDIO</h2>
+<div class="row">
+<button id="export" disabled>Export MP3</button>
+<span class="status" id="exportStatus">Siap setelah audio dimuat.</span>
+</div>
+<progress id="progress" value="0" max="100" hidden></progress>
+<p class="note">Pemrosesan dilakukan di browser. Tidak ada limiter otomatis. Hasil dapat clipping jika penguatan EQ terlalu tinggi, jadi atur level EQ dengan bijak.</p>
+</section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const bands=[
+ {f:40,type:'lowshelf',q:.8},{f:60,type:'peaking',q:1},
+ {f:230,type:'peaking',q:1},{f:910,type:'peaking',q:1},
+ {f:1000,type:'peaking',q:1},{f:14000,type:'highshelf',q:.8}
+];
+const modeNames={sub:'SUB',mid:'MID',high:'HIGH'};
+const info={
+ sub:'SUB: fokus frekuensi rendah, ditambah pengurangan komponen tengah yang sama pada kanal kiri dan kanan. Kick tidak bisa dijamin hilang total.',
+ mid:'MID: fokus frekuensi tengah tempat banyak energi vokal berada. Instrumen lain di rentang ini juga bisa terdengar.',
+ high:'HIGH: fokus frekuensi tinggi seperti hi-hat, cymbal, dan detail treble.'
+};
+let audioBuffer=null, audioCtx=null, source=null, nodes=[], activeMode='sub', currentUrl=null;
+const defaults=()=>Object.fromEntries(bands.map(b=>[b.f,0]));
+const modeValues={sub:defaults(),mid:defaults(),high:defaults()};
+const masterValues=defaults();
+
+function makeEQ(container,values,onChange){
+ container.innerHTML='';
+ bands.forEach(b=>{
+  const wrap=document.createElement('div');wrap.className='eqitem';
+  const label=document.createElement('label');
+  const name=document.createElement('span');name.textContent=b.f>=1000?(b.f/1000)+' kHz':b.f+' Hz';
+  const out=document.createElement('output');out.textContent=values[b.f].toFixed(1)+' dB';
+  label.append(name,out);
+  const slider=document.createElement('input');slider.type='range';slider.min=-18;slider.max=18;slider.step=.5;slider.value=values[b.f];
+  slider.addEventListener('input',()=>{values[b.f]=Number(slider.value);out.textContent=Number(slider.value).toFixed(1)+' dB';onChange()});
+  wrap.append(label,slider);container.append(wrap);
+ });
+}
+function refreshEQ(){makeEQ($('modeEQ'),modeValues[activeMode],()=>{});makeEQ($('masterEQ'),masterValues,()=>{});}
+refreshEQ();
+
+function disconnectGraph(){
+ if(source){try{source.disconnect()}catch(e){}}
+ nodes.forEach(n=>{try{n.disconnect()}catch(e){}});
+ nodes=[];
+}
+function addFilterChain(input,values){
+ let current=input;
+ bands.forEach(b=>{
+  const f=audioCtx.createBiquadFilter();f.type=b.type;f.frequency.value=b.f;f.Q.value=b.q;f.gain.value=values[b.f]||0;
+  current.connect(f);current=f;nodes.push(f);
+ });
+ return current;
+}
+function buildGraph(){
+ if(!audioCtx||!audioBuffer)return;
+ disconnectGraph();
+ source=audioCtx.createMediaElementSource($('player'));
+ const splitter=audioCtx.createChannelSplitter(2), merger=audioCtx.createChannelMerger(2);
+ source.connect(splitter);
+ const left=audioCtx.createGain(),right=audioCtx.createGain();
+ splitter.connect(left,0);splitter.connect(right,1);
+ nodes.push(splitter,merger,left,right);
+ let L=left,R=right;
+ // Mode filters: steep cascaded filters to form practical frequency regions.
+ function cascade(input,type,freq,count){
+  let x=input;
+  for(let i=0;i<count;i++){
+   const f=audioCtx.createBiquadFilter();f.type=type;f.frequency.value=freq;f.Q.value=.707;
+   x.connect(f);x=f;nodes.push(f);
+  }
+  return x;
+ }
+ if(activeMode==='sub'){
+  L=cascade(L,'lowpass',150,4);R=cascade(R,'lowpass',150,4);
+  // Reduce center-panned vocal-like content; retain side information.
+  const lGain=audioCtx.createGain(),rGain=audioCtx.createGain();
+  L.connect(lGain);R.connect(rGain);
+  const inv=audioCtx.createGain();inv.gain.value=-0.72;
+  const sum=audioCtx.createGain();sum.gain.value=.72;
+  L.connect(sum);R.connect(sum);L.connect(inv);R.connect(inv);
+  // Keep low-frequency mono foundation, attenuate common stereo center in upper bass.
+  const mixL=audioCtx.createGain(),mixR=audioCtx.createGain();
+  lGain.connect(mixL);rGain.connect(mixR);
+  sum.connect(mixL);inv.connect(mixR);
+  L=mixL;R=mixR;nodes.push(lGain,rGain,inv,sum,mixL,mixR);
+ }else if(activeMode==='mid'){
+  L=cascade(L,'highpass',250,2);R=cascade(R,'highpass',250,2);
+  L=cascade(L,'lowpass',4500,2);R=cascade(R,'lowpass',4500,2);
+ }else{
+  L=cascade(L,'highpass',4500,4);R=cascade(R,'highpass',4500,4);
+ }
+ const eqL=addFilterChain(L,modeValues[activeMode]);
+ const eqR=addFilterChain(R,modeValues[activeMode]);
+ const masterL=addFilterChain(eqL,masterValues);
+ const masterR=addFilterChain(eqR,masterValues);
+ masterL.connect(merger,0,0);masterR.connect(merger,0,1);
+ merger.connect(audioCtx.destination);
+}
+async function ensureGraph(){
+ if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+ if(audioCtx.state==='suspended')await audioCtx.resume();
+ if(!source)buildGraph();
+}
+$('file').addEventListener('change',async e=>{
+ const file=e.target.files[0];if(!file)return;
+ if(currentUrl)URL.revokeObjectURL(currentUrl);
+ currentUrl=URL.createObjectURL(file);
+ $('player').src=currentUrl;$('filename').textContent=file.name;
+ $('play').disabled=$('pause').disabled=$('stop').disabled=$('export').disabled=false;
+ if(audioCtx){disconnectGraph();source=null;}
+ try{
+  const data=await file.arrayBuffer();
+  audioBuffer=await (audioCtx||new(window.AudioContext||window.webkitAudioContext)()).decodeAudioData(data.slice(0));
+  $('exportStatus').textContent='Audio siap diproses.';
+ }catch(err){audioBuffer=null;$('exportStatus').textContent='Format audio tidak bisa dibaca untuk export.';}
+});
+$('play').onclick=async()=>{await ensureGraph();$('player').play()};
+$('pause').onclick=()=>$('player').pause();
+$('stop').onclick=()=>{$('player').pause();$('player').currentTime=0};
+
+document.querySelectorAll('.mode').forEach(btn=>btn.addEventListener('click',async()=>{
+ activeMode=btn.dataset.mode;
+ document.querySelectorAll('.mode').forEach(b=>b.classList.toggle('active',b===btn));
+ $('modeInfo').textContent=info[activeMode];refreshEQ();
+ if(audioCtx&&source){buildGraph();}
+}));
+
+// Offline export renders the same filter design, including all EQ bands.
+function offlineProcess(buffer,mode,modeEQ,masterEQ){
+ const ctx=new OfflineAudioContext(2,buffer.length,buffer.sampleRate);
+ const src=ctx.createBufferSource();src.buffer=buffer;
+ const split=ctx.createChannelSplitter(2),merge=ctx.createChannelMerger(2);
+ src.connect(split);
+ let L=ctx.createGain(),R=ctx.createGain();
+ split.connect(L,0);split.connect(R,1);
+ function cascade(input,type,freq,count){let x=input;for(let i=0;i<count;i++){let f=ctx.createBiquadFilter();f.type=type;f.frequency.value=freq;f.Q.value=.707;x.connect(f);x=f;}return x;}
+ if(mode==='sub'){
+  L=cascade(L,'lowpass',150,4);R=cascade(R,'lowpass',150,4);
+  const gl=ctx.createGain(),gr=ctx.createGain(),sum=ctx.createGain(),inv=ctx.createGain(),ml=ctx.createGain(),mr=ctx.createGain();
+  inv.gain.value=-.72;sum.gain.value=.72;
+  L.connect(gl);R.connect(gr);L.connect(sum);R.connect(sum);L.connect(inv);R.connect(inv);
+  gl.connect(ml);sum.connect(ml);gr.connect(mr);inv.connect(mr);L=ml;R=mr;
+ }else if(mode==='mid'){
+  L=cascade(L,'highpass',250,2);R=cascade(R,'highpass',250,2);
+  L=cascade(L,'lowpass',4500,2);R=cascade(R,'lowpass',4500,2);
+ }else{L=cascade(L,'highpass',4500,4);R=cascade(R,'highpass',4500,4);}
+ function eq(input,vals){let x=input;bands.forEach(b=>{let f=ctx.createBiquadFilter();f.type=b.type;f.frequency.value=b.f;f.Q.value=b.q;f.gain.value=vals[b.f]||0;x.connect(f);x=f;});return x;}
+ let a=eq(eq(L,modeEQ),masterEQ),b=eq(eq(R,modeEQ),masterEQ);
+ a.connect(merge,0,0);b.connect(merge,0,1);merge.connect(ctx.destination);src.start();
+ return ctx.startRendering();
+}
+$('export').onclick=async()=>{
+ if(!audioBuffer)return;
+ if(typeof lamejs==='undefined'){alert('Library MP3 belum termuat. Periksa koneksi internet lalu refresh.');return;}
+ $('export').disabled=true;$('progress').hidden=false;$('progress').value=5;$('exportStatus').textContent='Memproses audio...';
+ try{
+  const rendered=await offlineProcess(audioBuffer,activeMode,{...modeValues[activeMode]},{...masterValues});
+  $('progress').value=65;
+  const channels=rendered.numberOfChannels,sampleRate=rendered.sampleRate;
+  const encoder=new lamejs.Mp3Encoder(channels,sampleRate,192);
+  const left=rendered.getChannelData(0),right=channels>1?rendered.getChannelData(1):left;
+  const block=1152,parts=[];
+  for(let i=0;i<left.length;i+=block){
+   const l=new Int16Array(Math.min(block,left.length-i)),r=new Int16Array(l.length);
+   for(let j=0;j<l.length;j++){
+    l[j]=Math.max(-32768,Math.min(32767,left[i+j]*32767));
+    r[j]=Math.max(-32768,Math.min(32767,right[i+j]*32767));
+   }
+   const chunk=channels>1?encoder.encodeBuffer(l,r):encoder.encodeBuffer(l);
+   if(chunk.length)parts.push(new Uint8Array(chunk));
+   if(i%(block*100)===0)$('progress').value=65+Math.round(34*i/left.length);
+   await new Promise(resolve=>setTimeout(resolve,0));
+  }
+  const end=encoder.flush();if(end.length)parts.push(new Uint8Array(end));
+  const blob=new Blob(parts,{type:'audio/mp3'}),url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;a.download='crossover-'+activeMode+'.mp3';a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),30000);
+  $('progress').value=100;$('exportStatus').textContent='Export selesai: crossover-'+activeMode+'.mp3';
+ }catch(err){console.error(err);$('exportStatus').textContent='Export gagal: '+err.message;}
+ $('export').disabled=false;
+};
+</script>
+</body>
+</html>

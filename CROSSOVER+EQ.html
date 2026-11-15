@@ -1,0 +1,509 @@
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MINI CROSSOVER</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#17191e;color:#eee;font-family:Arial}
+header{padding:16px;background:#222831}
+main{max-width:900px;margin:auto;padding:15px}
+.panel{background:#252a33;padding:15px;margin-bottom:14px;border:1px solid #414956;border-radius:8px}
+h2{font-size:16px}
+button,.filelabel{background:#343d49;color:white;border:1px solid #586575;padding:11px 16px;border-radius:5px;cursor:pointer}
+input[type=file]{display:none}
+.modes,.eqgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.mode{font-size:20px;font-weight:bold;padding:20px 5px}
+.mode.active{border:2px solid #65c5ff;background:#16405b}
+.eqgrid{grid-template-columns:repeat(3,1fr)}
+.eqitem{background:#1b2027;padding:12px;border-radius:5px}
+.eqitem label{display:flex;justify-content:space-between;font-size:13px}
+.eqitem input{width:100%;accent-color:#65c5ff}
+output{color:#65c5ff}
+audio{width:100%;margin-top:12px}
+small,.status{color:#aeb7c4}
+@media(max-width:550px){.eqgrid{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<header>
+<h2>MINI CROSSOVER DIGITAL</h2>
+<small>SUB • MID • HIGH • 6 BAND EQ</small>
+</header>
+<main>
+
+<div class="panel">
+<h2>1. AUDIO INPUT</h2>
+<label class="filelabel" for="file">PILIH AUDIO</label>
+<input id="file" type="file" accept="audio/*">
+<p id="filename" class="status">Belum ada audio</p>
+<audio id="player" controls></audio>
+</div>
+
+<div class="panel">
+<h2>2. CROSSOVER</h2>
+<div class="modes">
+<button class="mode active" data-mode="sub">SUB</button>
+<button class="mode" data-mode="mid">MID</button>
+<button class="mode" data-mode="high">HIGH</button>
+</div>
+<p id="info" class="status">SUB: bass rendah dan pengurangan komponen vokal/kick.</p>
+</div>
+
+<div class="panel">
+<h2>3. EQ MODE (dB)</h2>
+<div id="modeEQ" class="eqgrid"></div>
+</div>
+
+<div class="panel">
+<h2>4. MASTER EQ (dB)</h2>
+<div id="masterEQ" class="eqgrid"></div>
+</div>
+
+<div class="panel">
+<h2>5. EXPORT</h2>
+<button id="export" disabled>EXPORT MP3</button>
+<p id="status" class="status"></p>
+<progress id="progress" max="100" value="0" style="width:100%" hidden></progress>
+</div>
+
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const player=$('player');
+
+const bands=[
+ [40,'lowshelf',.8],
+ [60,'peaking',1],
+ [230,'peaking',1],
+ [910,'peaking',1],
+ [1000,'peaking',1],
+ [14000,'highshelf',.8]
+];
+
+const makeDefaults=()=>Object.fromEntries(bands.map(b=>[b[0],0]));
+
+const values={
+ sub:makeDefaults(),
+ mid:makeDefaults(),
+ high:makeDefaults()
+};
+const master=makeDefaults();
+
+let mode='sub';
+let ctx=null;
+let source=null;
+let graph=null;
+let buffer=null;
+let audioURL=null;
+
+function createEQ(id,data){
+ const el=$(id);
+ el.innerHTML='';
+
+ bands.forEach(b=>{
+  const f=b[0];
+  const div=document.createElement('div');
+  div.className='eqitem';
+
+  const label=document.createElement('label');
+  const name=document.createElement('span');
+  name.textContent=f>=1000?(f/1000)+' kHz':f+' Hz';
+
+  const out=document.createElement('output');
+  out.textContent=data[f]+' dB';
+
+  label.append(name,out);
+
+  const slider=document.createElement('input');
+  slider.type='range';
+  slider.min=-18;
+  slider.max=18;
+  slider.step=.5;
+  slider.value=data[f];
+
+  slider.oninput=()=>{
+   data[f]=Number(slider.value);
+   out.textContent=data[f]+' dB';
+   updateEQ();
+  };
+
+  div.append(label,slider);
+  el.append(div);
+ });
+}
+
+function refreshEQ(){
+ createEQ('modeEQ',values[mode]);
+ createEQ('masterEQ',master);
+}
+
+function updateEQ(){
+ if(!graph)return;
+
+ bands.forEach((b,i)=>{
+  graph.modeL[i].gain.setTargetAtTime(values[mode][b[0]],ctx.currentTime,.02);
+  graph.modeR[i].gain.setTargetAtTime(values[mode][b[0]],ctx.currentTime,.02);
+  graph.masterL[i].gain.setTargetAtTime(master[b[0]],ctx.currentTime,.02);
+  graph.masterR[i].gain.setTargetAtTime(master[b[0]],ctx.currentTime,.02);
+ });
+}
+
+function filterChain(input,type,freq,count,nodes){
+ let x=input;
+ for(let i=0;i<count;i++){
+  const f=ctx.createBiquadFilter();
+  f.type=type;
+  f.frequency.value=freq;
+  f.Q.value=.707;
+  x.connect(f);
+  x=f;
+  nodes.push(f);
+ }
+ return x;
+}
+
+function makeEQChain(input,data,nodes){
+ let x=input;
+ const filters=[];
+
+ bands.forEach(b=>{
+  const f=ctx.createBiquadFilter();
+  f.type=b[1];
+  f.frequency.value=b[0];
+  f.Q.value=b[2];
+  f.gain.value=data[b[0]];
+
+  x.connect(f);
+  x=f;
+  filters.push(f);
+  nodes.push(f);
+ });
+
+ return {output:x,filters};
+}
+
+function buildGraph(){
+ if(!ctx || !source)return;
+
+ if(graph){
+  graph.nodes.forEach(n=>{
+   try{n.disconnect()}catch(e){}
+  });
+ }
+
+ const nodes=[];
+ const split=ctx.createChannelSplitter(2);
+ const merge=ctx.createChannelMerger(2);
+
+ const gainL=ctx.createGain();
+ const gainR=ctx.createGain();
+
+ source.disconnect();
+ source.connect(split);
+
+ split.connect(gainL,0);
+ split.connect(gainR,1);
+
+ nodes.push(split,merge,gainL,gainR);
+
+ let L=gainL;
+ let R=gainR;
+
+ if(mode==='sub'){
+  L=filterChain(L,'lowpass',150,4,nodes);
+  R=filterChain(R,'lowpass',150,4,nodes);
+
+  // Pengurangan komponen tengah stereo
+  const sum=ctx.createGain();
+  const inv=ctx.createGain();
+  const left=ctx.createGain();
+  const right=ctx.createGain();
+
+  sum.gain.value=.72;
+  inv.gain.value=-.72;
+
+  L.connect(left);
+  R.connect(left);
+  L.connect(sum);
+  R.connect(sum);
+  L.connect(inv);
+  R.connect(inv);
+
+  const outL=ctx.createGain();
+  const outR=ctx.createGain();
+
+  left.connect(outL);
+  sum.connect(outL);
+  left.disconnect();
+  sum.disconnect();
+
+  // Formula matriks stereo sederhana
+  const lDirect=ctx.createGain();
+  const rDirect=ctx.createGain();
+  const centerL=ctx.createGain();
+  const centerR=ctx.createGain();
+
+  L.connect(lDirect);
+  R.connect(rDirect);
+  L.connect(centerL);
+  R.connect(centerL);
+  L.connect(centerR);
+  R.connect(centerR);
+
+  centerL.gain.value=-.25;
+  centerR.gain.value=-.25;
+
+  const mixL=ctx.createGain();
+  const mixR=ctx.createGain();
+
+  lDirect.connect(mixL);
+  centerL.connect(mixL);
+  rDirect.connect(mixR);
+  centerR.connect(mixR);
+
+  L=mixL;
+  R=mixR;
+
+  nodes.push(sum,inv,left,right,outL,outR,lDirect,rDirect,centerL,centerR,mixL,mixR);
+ }
+
+ if(mode==='mid'){
+  L=filterChain(L,'highpass',250,2,nodes);
+  R=filterChain(R,'highpass',250,2,nodes);
+  L=filterChain(L,'lowpass',4500,2,nodes);
+  R=filterChain(R,'lowpass',4500,2,nodes);
+ }
+
+ if(mode==='high'){
+  L=filterChain(L,'highpass',4500,4,nodes);
+  R=filterChain(R,'highpass',4500,4,nodes);
+ }
+
+ const eqL=makeEQChain(L,values[mode],nodes);
+ const eqR=makeEQChain(R,values[mode],nodes);
+
+ const masterL=makeEQChain(eqL.output,master,nodes);
+ const masterR=makeEQChain(eqR.output,master,nodes);
+
+ masterL.output.connect(merge,0,0);
+ masterR.output.connect(merge,0,1);
+ merge.connect(ctx.destination);
+
+ graph={
+  nodes,
+  modeL:eqL.filters,
+  modeR:eqR.filters,
+  masterL:masterL.filters,
+  masterR:masterR.filters
+ };
+}
+
+async function setupAudio(){
+ if(!ctx){
+  ctx=new(window.AudioContext||window.webkitAudioContext)();
+ }
+
+ if(ctx.state==='suspended')await ctx.resume();
+
+ if(!source){
+  source=ctx.createMediaElementSource(player);
+ }
+
+ if(!graph)buildGraph();
+}
+
+$('file').onchange=async e=>{
+ const file=e.target.files[0];
+ if(!file)return;
+
+ if(audioURL)URL.revokeObjectURL(audioURL);
+ audioURL=URL.createObjectURL(file);
+
+ player.src=audioURL;
+ $('filename').textContent=file.name;
+ $('export').disabled=true;
+ $('status').textContent='Membaca audio...';
+
+ try{
+  const tempCtx=new(window.AudioContext||window.webkitAudioContext)();
+  buffer=await tempCtx.decodeAudioData(await file.arrayBuffer());
+  await tempCtx.close();
+
+  $('export').disabled=false;
+  $('status').textContent='Audio siap.';
+ }catch(err){
+  buffer=null;
+  $('status').textContent='Audio tidak dapat dibaca.';
+ }
+};
+
+player.onplay=async()=>{
+ try{
+  await setupAudio();
+ }catch(e){
+  console.error(e);
+  player.pause();
+  alert('Audio engine gagal: '+e.message);
+ }
+};
+
+document.querySelectorAll('.mode').forEach(btn=>{
+ btn.onclick=()=>{
+  mode=btn.dataset.mode;
+
+  document.querySelectorAll('.mode').forEach(b=>{
+   b.classList.toggle('active',b===btn);
+  });
+
+  const texts={
+   sub:'SUB: fokus bass rendah, dengan pengurangan komponen vokal/kick stereo.',
+   mid:'MID: fokus frekuensi tengah, terutama wilayah vokal.',
+   high:'HIGH: fokus frekuensi tinggi seperti cymbal dan hi-hat.'
+  };
+
+  $('info').textContent=texts[mode];
+  refreshEQ();
+
+  if(source){
+   buildGraph();
+  }
+ };
+});
+
+refreshEQ();
+
+// Export memakai OfflineAudioContext dengan susunan filter yang sama.
+async function renderOffline(){
+ const off=new OfflineAudioContext(2,buffer.length,buffer.sampleRate);
+ const src=off.createBufferSource();
+ src.buffer=buffer;
+
+ const split=off.createChannelSplitter(2);
+ const merge=off.createChannelMerger(2);
+ const gl=off.createGain();
+ const gr=off.createGain();
+
+ src.connect(split);
+ split.connect(gl,0);
+ split.connect(gr,1);
+
+ function chain(input,type,freq,count){
+  let x=input;
+  for(let i=0;i<count;i++){
+   const f=off.createBiquadFilter();
+   f.type=type;
+   f.frequency.value=freq;
+   f.Q.value=.707;
+   x.connect(f);
+   x=f;
+  }
+  return x;
+ }
+
+ let L=gl,R=gr;
+
+ if(mode==='sub'){
+  L=chain(L,'lowpass',150,4);
+  R=chain(R,'lowpass',150,4);
+ }
+ if(mode==='mid'){
+  L=chain(L,'highpass',250,2);
+  R=chain(R,'highpass',250,2);
+  L=chain(L,'lowpass',4500,2);
+  R=chain(R,'lowpass',4500,2);
+ }
+ if(mode==='high'){
+  L=chain(L,'highpass',4500,4);
+  R=chain(R,'highpass',4500,4);
+ }
+
+ function eq(input,data){
+  let x=input;
+  bands.forEach(b=>{
+   const f=off.createBiquadFilter();
+   f.type=b[1];
+   f.frequency.value=b[0];
+   f.Q.value=b[2];
+   f.gain.value=data[b[0]];
+   x.connect(f);
+   x=f;
+  });
+  return x;
+ }
+
+ const a=eq(eq(L,values[mode]),master);
+ const b=eq(eq(R,values[mode]),master);
+
+ a.connect(merge,0,0);
+ b.connect(merge,0,1);
+ merge.connect(off.destination);
+
+ src.start();
+ return await off.startRendering();
+}
+
+$('export').onclick=async()=>{
+ if(!buffer)return;
+
+ if(typeof lamejs==='undefined'){
+  alert('MP3 encoder belum termuat. Periksa koneksi internet.');
+  return;
+ }
+
+ $('export').disabled=true;
+ $('progress').hidden=false;
+ $('progress').value=0;
+
+ try{
+  const rendered=await renderOffline();
+  const enc=new lamejs.Mp3Encoder(2,rendered.sampleRate,192);
+  const L=rendered.getChannelData(0);
+  const R=rendered.getChannelData(1);
+  const chunks=[];
+  const block=1152;
+
+  for(let i=0;i<L.length;i+=block){
+   const len=Math.min(block,L.length-i);
+   const l=new Int16Array(len);
+   const r=new Int16Array(len);
+
+   for(let j=0;j<len;j++){
+    l[j]=Math.max(-32768,Math.min(32767,L[i+j]*32767));
+    r[j]=Math.max(-32768,Math.min(32767,R[i+j]*32767));
+   }
+
+   const data=enc.encodeBuffer(l,r);
+   if(data.length)chunks.push(new Uint8Array(data));
+
+   $('progress').value=Math.round(i/L.length*100);
+   await new Promise(resolve=>setTimeout(resolve,0));
+  }
+
+  const end=enc.flush();
+  if(end.length)chunks.push(new Uint8Array(end));
+
+  const blob=new Blob(chunks,{type:'audio/mp3'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+
+  a.href=url;
+  a.download='CROSSOVER-'+mode.toUpperCase()+'.mp3';
+  a.click();
+
+  setTimeout(()=>URL.revokeObjectURL(url),30000);
+  $('status').textContent='Export selesai.';
+ }catch(e){
+  console.error(e);
+  $('status').textContent='Export gagal: '+e.message;
+ }
+
+ $('export').disabled=false;
+};
+</script>
+</body>
+</html>
